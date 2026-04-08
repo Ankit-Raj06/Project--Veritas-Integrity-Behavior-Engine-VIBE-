@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "VERITAS"
+version = "0.1.0"
+description = "We are developing an env simulating a real world chat platform to train an AI to act as a moderator, evaluating its ability to detect harmful content in context aware scenarios."
+requires-python = ">=3.8"
+
+[tool.setuptools.packages.find]
+where = ["."]
