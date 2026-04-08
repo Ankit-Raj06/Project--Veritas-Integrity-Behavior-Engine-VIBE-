@@ -8,6 +8,10 @@ port: 7860
 metadata:
   title: "VIBE – Veritas Integrity Behavior Engine"
   description: >
+    tags:
+     -openenv
+     - agent-environment
+    - reinforcement-learning
     Context-aware AI content moderation environment.
     An agent moderates YouTube comments by reasoning about
     video context, chat thread history, cultural tone,
