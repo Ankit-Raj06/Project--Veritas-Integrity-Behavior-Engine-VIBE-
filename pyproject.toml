@@ -1,18 +1,21 @@
 
 [project]
-name = "vigilenv"
+name = "vibe"
 version = "1.0.0"
-description = "Context-aware hate speech and prompt injection detector"
+description = "Veritas Integrity Behavior Engine"
 requires-python = ">=3.10"
+
 dependencies = [
-    "openenv-core",
-    "openai",
-    "pydantic",
+    "openenv-core>=0.2.0",
     "fastapi",
     "uvicorn",
-    "pandas"
+    "pydantic",
+    "openai"
 ]
+
+[project.scripts]
+server = "app:app"
 
 [build-system]
 requires = ["setuptools>=61.0"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
