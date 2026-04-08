@@ -1,0 +1,71 @@
+spec_version: 1
+name: vibe-content-moderation
+type: text
+runtime: python
+app: app:app
+port: 7860
+
+metadata:
+  title: "VIBE – Veritas Integrity Behavior Engine"
+  description: >
+    Context-aware AI content moderation environment.
+    An agent moderates YouTube comments by reasoning about
+    video context, chat thread history, cultural tone,
+    and Hinglish/code-switching patterns.
+  tasks:
+    - id: task_easy
+      name: "Single Comment Moderation"
+      description: "Moderate an isolated comment given video title and category."
+      difficulty: easy
+      max_steps: 1
+      score_range: [0.0, 1.0]
+    - id: task_medium
+      name: "Thread Context Moderation"
+      description: "Moderate a comment in context of its full reply thread."
+      difficulty: medium
+      max_steps: 5
+      score_range: [0.0, 1.0]
+    - id: task_hard
+      name: "Cross-Cultural & Ambiguous Moderation"
+      description: >
+        Moderate comments that mix languages, use cultural idioms,
+        or are ambiguous without deep context understanding.
+      difficulty: hard
+      max_steps: 10
+      score_range: [0.0, 1.0]
+
+  action_space:
+    type: object
+    properties:
+      decision:
+        type: string
+        enum: [safe, flag, remove]
+        description: "Moderation decision"
+      reason:
+        type: string
+        description: "Agent's justification for the decision"
+
+  observation_space:
+    type: object
+    properties:
+      video_context:
+        type: string
+        description: "Description of the video the comment was posted on"
+      chat_history:
+        type: array
+        description: "Previous comments in the same thread"
+      comment:
+        type: string
+        description: "The comment to moderate"
+      difficulty:
+        type: string
+        description: "Task difficulty: easy / medium / hard"
+      reward:
+        type: number
+        description: "Reward from previous step (0.0 on reset)"
+      done:
+        type: boolean
+        description: "Whether the episode is complete"
+      message:
+        type: string
+        description: "Human-readable feedback on last action"
