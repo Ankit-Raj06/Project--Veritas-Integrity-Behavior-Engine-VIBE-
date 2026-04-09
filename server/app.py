@@ -69,3 +69,14 @@ def state():
     if _env is None:
         return {"status": "not_started"}
     return _env.state()
+def main():
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+    )
+ 
+ 
+if __name__ == "__main__":
+    main()
