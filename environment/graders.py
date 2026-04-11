@@ -2,7 +2,7 @@
 VIBE – Graders
 Scoring functions for all three difficulty levels.
 
-Score ranges: 0.0 (wrong) → 1.0 (perfect)
+Score ranges: (0,1) — strictly bounded
 Partial credit is given for "flag" when truth is ambiguous.
 """
 
@@ -12,7 +12,6 @@ from typing import Optional
 # ── Label normalisation ───────────────────────────────────────────────────────
 
 DECISION_MAP = {
-    # Accept all surface variants the LLM might produce
     "safe":    "safe",
     "approve": "safe",
     "ok":      "safe",
@@ -46,6 +45,9 @@ def normalise_decision(raw: str) -> str:
 def normalise_label(raw) -> str:
     return LABEL_MAP.get(str(raw).strip().lower(), "flag")
 
+
+# ── Clamp helper ─────────────────────────────────────────────────────────────
+
 def clamp_score(score: float) -> float:
     """
     Ensures score is strictly between (0, 1)
@@ -65,40 +67,43 @@ def grade(
     threat_type:  Optional[str] = "general",
 ) -> float:
     """
-    Returns a score in [0.0, 1.0].
+    Returns a score strictly in (0,1).
 
     Scoring logic:
-      - Exact match                        → 0.99
-      - Predicted "flag", truth is toxic   → 0.5  (cautious partial credit)
-      - Predicted "flag", truth is safe    → 0.4  (over-cautious but not wrong)
-      - Wrong direction (remove↔safe)      → 0.01
+      - Exact match                        → ~1.0
+      - Predicted "flag", truth is toxic   → 0.5
+      - Predicted "flag", truth is safe    → 0.4
+      - Wrong direction (remove↔safe)      → ~0.0
     """
+
     pred  = normalise_decision(prediction)
     truth = normalise_label(ground_truth)
 
+    # Default score
+    score = 0.0
+
     if pred == truth:
-        return clamp_score(1.0)
+        score = 1.0
 
-    # Partial credit cases
-    if pred == "flag":
+    elif pred == "flag":
         if truth == "remove":
-            return 0.5   # escalated instead of removing — cautious, partial credit
-        if truth == "safe":
-            return 0.4   # over-cautious, but not harmful
+            score = 0.5
+        elif truth == "safe":
+            score = 0.4
 
-    if truth == "flag":
+    elif truth == "flag":
         if pred == "safe":
-            return 0.3   # missed an ambiguous case
-        if pred == "remove":
-            return 0.6   # over-moderated an ambiguous case
+            score = 0.3
+        elif pred == "remove":
+            score = 0.6
 
-    # Worst cases: missed harmful content or falsely removed safe content
-    if pred == "safe" and truth == "remove":
-        return clamp_score(0.0)   # missed hate/toxic — unacceptable
-    if pred == "remove" and truth == "safe":
-        return 0.1   # false positive — penalised but not zero
+    elif pred == "safe" and truth == "remove":
+        score = 0.0
 
-    return clamp_score(0.0)
+    elif pred == "remove" and truth == "safe":
+        score = 0.1
+
+    return clamp_score(score)
 
 
 # ── Per-difficulty graders ────────────────────────────────────────────────────
@@ -108,15 +113,22 @@ def grade_easy(prediction: str, ground_truth, **kwargs) -> float:
     return grade(prediction, ground_truth)
 
 
-def grade_medium(prediction: str, ground_truth, context_match: bool = True, **kwargs) -> float:
+def grade_medium(
+    prediction: str,
+    ground_truth,
+    context_match: bool = True,
+    **kwargs
+) -> float:
     """
     Task 2 — thread moderation.
     Bonus 0.1 if prediction is consistent with thread context.
     """
     base = grade(prediction, ground_truth)
+
     if context_match and base > 0:
-        base = min(1.0, base + 0.1)
-    return base
+        base += 0.1
+
+    return clamp_score(base)
 
 
 def grade_hard(
@@ -130,14 +142,16 @@ def grade_hard(
     Task 3 — cross-platform / multi-modal.
     Bonus 0.15 if justification references relevant signals.
     """
+
     base = grade(prediction, ground_truth, threat_type=threat_type)
 
-    # Bonus for quality justification (heuristic: >10 words and not a generic phrase)
+    # Bonus for quality justification
     if justification:
         words = justification.strip().split()
         generic_phrases = {"content", "violates", "policy", "guidelines", "inappropriate"}
-        unique_words    = {w.lower() for w in words} - generic_phrases
-        if len(words) >= 10 and len(unique_words) >= 5:
-            base = min(1.0, base + 0.15)
+        unique_words = {w.lower() for w in words} - generic_phrases
 
-    return base
+        if len(words) >= 10 and len(unique_words) >= 5:
+            base += 0.15
+
+    return clamp_score(base)
