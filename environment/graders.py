@@ -46,6 +46,16 @@ def normalise_decision(raw: str) -> str:
 def normalise_label(raw) -> str:
     return LABEL_MAP.get(str(raw).strip().lower(), "flag")
 
+def clamp_score(score: float) -> float:
+    """
+    Ensures score is strictly between (0, 1)
+    """
+    if score <= 0.0:
+        return 0.01
+    if score >= 1.0:
+        return 0.99
+    return score
+
 
 # ── Core grader ───────────────────────────────────────────────────────────────
 
@@ -58,16 +68,16 @@ def grade(
     Returns a score in [0.0, 1.0].
 
     Scoring logic:
-      - Exact match                        → 1.0
+      - Exact match                        → 0.99
       - Predicted "flag", truth is toxic   → 0.5  (cautious partial credit)
       - Predicted "flag", truth is safe    → 0.4  (over-cautious but not wrong)
-      - Wrong direction (remove↔safe)      → 0.0
+      - Wrong direction (remove↔safe)      → 0.01
     """
     pred  = normalise_decision(prediction)
     truth = normalise_label(ground_truth)
 
     if pred == truth:
-        return 1.0
+        return clamp_score(1.0)
 
     # Partial credit cases
     if pred == "flag":
@@ -84,11 +94,11 @@ def grade(
 
     # Worst cases: missed harmful content or falsely removed safe content
     if pred == "safe" and truth == "remove":
-        return 0.0   # missed hate/toxic — unacceptable
+        return clamp_score(0.0)   # missed hate/toxic — unacceptable
     if pred == "remove" and truth == "safe":
         return 0.1   # false positive — penalised but not zero
 
-    return 0.0
+    return clamp_score(0.0)
 
 
 # ── Per-difficulty graders ────────────────────────────────────────────────────
