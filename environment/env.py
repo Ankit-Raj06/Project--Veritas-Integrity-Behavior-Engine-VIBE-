@@ -10,32 +10,47 @@ from environment.dataset import SCENARIOS
 from environment.graders import grade_easy, grade_medium, grade_hard
 
 
-# ── Pydantic Models ──────────────────────────────────────────────────────────
+# ── Score safety ─────────────────────────────────────────────────────────────
+
+def safe_score(score: float) -> float:
+    """Strictly between (0, 1) — 0.0 and 1.0 are NOT valid."""
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return 0.05
+    if s <= 0.0:
+        return 0.01
+    if s >= 1.0:
+        return 0.99
+    return round(s, 4)
+
+
+# ── Pydantic Models ───────────────────────────────────────────────────────────
 
 class Observation(BaseModel):
     video_context: str
-    chat_history: list
-    comment: str
-    difficulty: str
-    reward: float = 0.0
-    done: bool = False
-    message: str = ""
+    chat_history:  list
+    comment:       str
+    difficulty:    str
+    reward:        float = 0.05   # never 0.0
+    done:          bool  = False
+    message:       str   = ""
 
 
 class Action(BaseModel):
     decision: str
-    reason: str = ""
+    reason:   str = ""
 
 
 class StepResult(BaseModel):
-    score: float
-    done: bool
-    info: dict
-    reward: float
+    score:       float
+    done:        bool
+    info:        dict
+    reward:      float
     observation: Observation
 
 
-# ── Environment ──────────────────────────────────────────────────────────────
+# ── Environment ───────────────────────────────────────────────────────────────
 
 class AISafetyEnv:
 
@@ -44,11 +59,10 @@ class AISafetyEnv:
         self.current_scenario = None
         self._step_count = 0
 
-    # ── reset ────────────────────────────────────────────────────────────────
+    # ── reset ─────────────────────────────────────────────────────────────────
     def reset(self) -> Observation:
 
         pool = [s for s in SCENARIOS if s["difficulty"] == self.difficulty]
-
         if not pool:
             pool = list(SCENARIOS)
 
@@ -60,12 +74,12 @@ class AISafetyEnv:
             chat_history=self.current_scenario.get("chat_history", []),
             comment=self.current_scenario["comment"],
             difficulty=self.current_scenario["difficulty"],
-            reward=0.0,
+            reward=0.05,          # never 0.0
             done=False,
             message="Episode started. Moderate the comment.",
         )
 
-    # ── step ─────────────────────────────────────────────────────────────────
+    # ── step ──────────────────────────────────────────────────────────────────
     def step(self, action: Action) -> StepResult:
 
         if self.current_scenario is None:
@@ -75,39 +89,35 @@ class AISafetyEnv:
 
         # Difficulty-based grading
         if self.difficulty == "easy":
-            score = grade_easy(
+            raw_score = grade_easy(
                 prediction=action.decision,
                 ground_truth=self.current_scenario["label"]
             )
-
         elif self.difficulty == "medium":
-            score = grade_medium(
+            raw_score = grade_medium(
                 prediction=action.decision,
                 ground_truth=self.current_scenario["label"],
                 context_match=True
             )
-
         else:
-            score = grade_hard(
+            raw_score = grade_hard(
                 prediction=action.decision,
                 ground_truth=self.current_scenario["label"],
                 justification=action.reason,
                 threat_type=self.current_scenario.get("threat_type", "general")
             )
 
-        # Multi-step episode settings
-        max_steps_map = {
-            "easy": 1,
-            "medium": 3,
-            "hard": 5
-        }
+        # Clamp at source — every path goes through safe_score
+        score = safe_score(raw_score)
 
-        done = self._step_count >= max_steps_map[self.difficulty]
+        # Multi-step episode settings
+        max_steps_map = {"easy": 1, "medium": 3, "hard": 5}
+        done = self._step_count >= max_steps_map.get(self.difficulty, 1)
 
         info = {
             "correct_label": self.current_scenario["label"],
-            "threat_type": self.current_scenario.get("threat_type", "general"),
-            "step": self._step_count,
+            "threat_type":   self.current_scenario.get("threat_type", "general"),
+            "step":          self._step_count,
         }
 
         obs = Observation(
@@ -115,29 +125,27 @@ class AISafetyEnv:
             chat_history=self.current_scenario.get("chat_history", []),
             comment=self.current_scenario["comment"],
             difficulty=self.current_scenario["difficulty"],
-            reward=float(score),
+            reward=score,          # always safe_score
             done=done,
-            message=f"Decision '{action.decision}' scored {score:.2f}",
+            message=f"Decision '{action.decision}' scored {score:.4f}",
         )
 
-        # Load another scenario if episode continues
+        # Advance to next scenario if episode continues
         if not done:
             pool = [s for s in SCENARIOS if s["difficulty"] == self.difficulty]
-
             if not pool:
                 pool = list(SCENARIOS)
-
             self.current_scenario = random.choice(pool)
 
         return StepResult(
-            score=float(score),
-            reward=float(score),
+            score=score,           # always safe_score
+            reward=score,          # always safe_score
             done=done,
             info=info,
             observation=obs,
         )
 
-    # ── state ────────────────────────────────────────────────────────────────
+    # ── state ─────────────────────────────────────────────────────────────────
     def state(self):
 
         if self.current_scenario is None:
@@ -146,5 +154,5 @@ class AISafetyEnv:
         return {
             "difficulty": self.difficulty,
             "step_count": self._step_count,
-            "scenario": self.current_scenario,
+            "scenario":   self.current_scenario,
         }
