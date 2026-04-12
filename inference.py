@@ -153,11 +153,10 @@ def run_episode(client: OpenAI, env, difficulty: str, episode_num: int) -> dict:
 
     final_score = total_reward / max(step_num, 1)
 
-    # Ensure final_score is strictly between (0, 1)
-    if final_score <= 0.0:
-        final_score = 0.01
-    elif final_score >= 1.0:
-        final_score = 0.99
+    # Ensure final_score is strictly between (0, 1) - use min/max like reference
+    _SCORE_MIN = 0.001
+    _SCORE_MAX = 0.999
+    final_score = min(max(final_score, _SCORE_MIN), _SCORE_MAX)
 
     log("END", {
         "task":         task_name,
@@ -208,11 +207,10 @@ def main() -> None:
     # ── Summary ──
     overall = sum(r["score"] for r in all_results) / len(all_results)
 
-    # Ensure overall is strictly between (0, 1)
-    if overall <= 0.0:
-        overall = 0.01
-    elif overall >= 1.0:
-        overall = 0.99
+    # Ensure overall is strictly between (0, 1) - use min/max like reference
+    _SCORE_MIN = 0.001
+    _SCORE_MAX = 0.999
+    overall = min(max(overall, _SCORE_MIN), _SCORE_MAX)
 
     print("\n" + "=" * 60)
     print("FINAL RESULTS")
