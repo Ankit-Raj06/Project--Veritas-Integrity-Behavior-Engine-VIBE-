@@ -4,220 +4,219 @@ VIBE – Veritas Integrity Behavior Engine
 Inference script for Scaler/Meta PyTorch OpenEnv Hackathon.
 
 Reads from environment variables:
-  API_BASE_URL – LLM router base URL
-  MODEL_NAME   – model identifier
-  HF_TOKEN     – Hugging Face token (used as API key)
+    API_BASE_URL  – LLM router base URL
+    MODEL_NAME    – model identifier
+    HF_TOKEN      – Hugging Face token (used as API key)
+
+Log format:
+    [START] {...}
+    [STEP]  {...}
+    [END]   {...}
 """
 
-import os
 import json
-import time
-import logging
-from typing import Any, Dict, Optional, Tuple
+import os
+import sys
+import random
 
 from openai import OpenAI
 
-from graders import grade_easy, grade_medium, grade_hard
+# ── Config ──────────────────────────────────────────────────────────────────
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME   = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.3-70B-Instruct")
+API_KEY      = os.getenv("HF_TOKEN",     "")
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
+DIFFICULTIES = ["easy", "medium", "hard"]
+MAX_STEPS    = 10
 
-# ── Environment ───────────────────────────────────────────────────────────────
-API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000/v1")
-MODEL_NAME   = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-HF_TOKEN     = os.environ.get("HF_TOKEN", "")
+# ── System prompt ────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are VIBE — a context-aware AI content moderation agent.
 
-client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "EMPTY")
+Your job: analyse a YouTube comment alongside its video context and decide how to moderate it.
 
+You will receive:
+- video_context: a description of the video the comment was posted on
+- chat_history: previous comments in the same thread
+- comment: the comment you must moderate
+- difficulty: easy / medium / hard
 
-# ── Safety clamp (mirrors graders.py) ────────────────────────────────────────
-def safe_score(score: float) -> float:
-    """Ensure score is strictly within (0, 1) — never exactly 0.0 or 1.0."""
-    return max(0.001, min(0.999, float(score)))
+DECISION OPTIONS:
+- "safe"    → Comment is acceptable; no action needed
+- "flag"    → Comment is borderline or context-dependent; escalate for human review
+- "remove"  → Comment is clearly harmful, hateful, or violates policy
 
+IMPORTANT RULES:
+1. Context is everything. "bhai tu toh gaya 💀" on a gaming video = safe banter. Same phrase on a communal news video = flag/remove.
+2. Hinglish and code-switching (Hindi+English mixed) is normal — do not flag purely based on non-English words.
+3. Sarcasm, dark humour, and cultural idioms require context to judge correctly.
+4. Consider the chat_history — a single comment may only be harmful in sequence.
 
-# ── LLM call ─────────────────────────────────────────────────────────────────
-def call_llm(
-    system_prompt: str,
-    user_prompt:   str,
-    temperature:   float = 0.0,
-    max_tokens:    int   = 256,
-) -> str:
-    """Call the LLM and return the response text. Returns empty string on error."""
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error("LLM call failed: %s", e)
-        return ""
+Respond ONLY with a JSON object in this exact format (no extra text, no markdown):
+{"decision": "<safe|flag|remove>", "reason": "<one sentence explanation>"}"""
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def log(tag: str, data: dict) -> None:
+    """Print a log line in the exact format the Scaler validator reads."""
+    print(f"[{tag}] {json.dumps(data)}", flush=True)
 
 
-# ── Prompt templates ──────────────────────────────────────────────────────────
-SYSTEM_EASY = """You are a content moderation classifier.
-Classify the following comment as one of: safe, flag, remove.
-Respond with ONLY one word — the label."""
-
-SYSTEM_MEDIUM = """You are a content moderation classifier reviewing a discussion thread.
-Classify the final comment in context as one of: safe, flag, remove.
-Respond with ONLY one word — the label."""
-
-SYSTEM_HARD = """You are a senior content moderation analyst.
-You will be given a post (possibly cross-platform or multi-modal).
-Return a JSON object with exactly two keys:
-  "decision": one of "safe", "flag", or "remove"
-  "justification": a concise explanation (≥10 words) citing specific signals you observed.
-Respond with ONLY valid JSON, no markdown fences."""
-
-
-# ── Task runners ──────────────────────────────────────────────────────────────
-def run_easy(obs: Dict[str, Any]) -> Tuple[str, float]:
-    """Task 1 — single comment, unambiguous label."""
-    comment = obs.get("comment", obs.get("text", ""))
-    prediction = call_llm(SYSTEM_EASY, comment) or "flag"
-    score = grade_easy(prediction, obs.get("label", obs.get("ground_truth", "flag")))
-    return prediction, safe_score(score)
-
-
-def run_medium(obs: Dict[str, Any]) -> Tuple[str, float]:
-    """Task 2 — thread moderation with context."""
-    thread  = obs.get("thread", [])
-    comment = obs.get("comment", obs.get("text", ""))
-
-    context_lines = "\n".join(
-        f"[{i+1}] {c}" for i, c in enumerate(thread)
+def call_llm(client: OpenAI, observation: dict) -> dict:
+    """Call the LLM and return parsed {decision, reason}."""
+    user_message = (
+        f"Video context: {observation.get('video_context', '')}\n"
+        f"Chat history: {json.dumps(observation.get('chat_history', []))}\n"
+        f"Comment to moderate: {observation.get('comment', '')}\n"
+        f"Difficulty: {observation.get('difficulty', 'easy')}"
     )
-    user_prompt = f"Thread context:\n{context_lines}\n\nComment to classify:\n{comment}"
 
-    prediction    = call_llm(SYSTEM_MEDIUM, user_prompt) or "flag"
-    context_match = obs.get("context_match", True)
-    score = grade_medium(
-        prediction,
-        obs.get("label", obs.get("ground_truth", "flag")),
-        context_match=context_match,
-    )
-    return prediction, safe_score(score)
-
-
-def run_hard(obs: Dict[str, Any]) -> Tuple[str, float]:
-    """Task 3 — cross-platform / multi-modal with justification."""
-    content = obs.get("content", obs.get("text", obs.get("comment", "")))
-    threat_type = obs.get("threat_type", "general")
-
-    raw = call_llm(SYSTEM_HARD, content, max_tokens=512) or "{}"
-
-    # Strip accidental markdown fences
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = "\n".join(raw.split("\n")[1:])
-    if raw.endswith("```"):
-        raw = "\n".join(raw.split("\n")[:-1])
-
-    try:
-        parsed = json.loads(raw)
-        prediction    = parsed.get("decision", "flag")
-        justification = parsed.get("justification", "")
-    except json.JSONDecodeError:
-        logger.warning("Hard task JSON parse failed; raw=%r", raw)
-        prediction    = "flag"
-        justification = ""
-
-    score = grade_hard(
-        prediction,
-        obs.get("label", obs.get("ground_truth", "flag")),
-        justification=justification,
-        threat_type=threat_type,
-    )
-    return prediction, safe_score(score)
+    for attempt in range(3):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_message},
+                ],
+                temperature=0.1,
+                max_tokens=150,
+            )
+            raw = response.choices[0].message.content.strip()
+            # Strip markdown fences if present
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            parsed = json.loads(raw)
+            if parsed.get("decision") in ("safe", "flag", "remove"):
+                return parsed
+        except Exception as e:
+            if attempt == 2:
+                # Fallback on final attempt
+                return {"decision": "flag", "reason": f"LLM error after retries: {e}"}
+    return {"decision": "flag", "reason": "Could not parse LLM response"}
 
 
-# ── Episode runner ────────────────────────────────────────────────────────────
-def run_episode(env) -> float:
-    """
-    Drive one episode of the VIBE environment.
-    Returns the final score strictly in (0, 1).
-    """
-    obs   = env.reset()
+def run_episode(client: OpenAI, env, difficulty: str, episode_num: int) -> dict:
+    """Run one full episode and return result dict."""
+    task_name = f"task_{difficulty}"
+
+    log("START", {
+        "task":       task_name,
+        "episode":    episode_num,
+        "difficulty": difficulty,
+    })
+
+    # Reset environment
+    obs_obj = env.reset()
+
+    # Normalise observation — supports both Pydantic model and plain dict
+    if hasattr(obs_obj, "dict"):
+        obs = obs_obj.dict()
+    elif hasattr(obs_obj, "model_dump"):
+        obs = obs_obj.model_dump()
+    else:
+        obs = dict(obs_obj) if obs_obj else {}
+
     total_reward = 0.0
     step_num     = 0
-    done         = False
 
-    while not done:
-        step_num += 1
+    for step_num in range(1, MAX_STEPS + 1):
+        # Get action from LLM
+        action_dict = call_llm(client, obs)
 
-        # Determine task difficulty
-        difficulty = obs.get("difficulty", "easy") if isinstance(obs, dict) else "easy"
+        # Build Action object
+        from environment.env import Action  # import here to keep it flexible
+        action = Action(
+            decision=action_dict["decision"],
+            reason=action_dict.get("reason", ""),
+        )
 
-        if difficulty == "hard":
-            action, step_score = run_hard(obs)
-        elif difficulty == "medium":
-            action, step_score = run_medium(obs)
-        else:
-            action, step_score = run_easy(obs)
-
-        # Submit action to environment
+        # Step environment
         result = env.step(action)
 
-        # Parse env response — handle tuple, dict, or object
+        # Normalise result — supports (score, done, info) tuple OR dict/object
         if isinstance(result, tuple):
-            env_score, done, info = result[0], result[1], result[2] if len(result) > 2 else {}
-            env_score = safe_score(env_score)
+            score, done, info = result
         elif isinstance(result, dict):
-            env_score = safe_score(result.get("score", result.get("reward", 0.1)))
-            done      = result.get("done", True)
-            info      = result.get("info", {})
+            score = result.get("score", result.get("reward", 0.0))
+            done  = result.get("done", True)
+            info  = result.get("info", {})
         else:
-            env_score = safe_score(getattr(result, "reward", getattr(result, "score", 0.1)))
-            done      = getattr(result, "done", True)
-            info      = getattr(result, "info", {})
+            # Pydantic StepResult or similar
+            score = getattr(result, "reward", getattr(result, "score", 0.0))
+            done  = getattr(result, "done", True)
+            info  = getattr(result, "info", {})
 
-        # Use our grader score when the env doesn't return a meaningful one
-        combined_score = safe_score((step_score + env_score) / 2.0)
-        total_reward  += combined_score
+        total_reward += float(score)
 
-        logger.info(
-            "step=%d difficulty=%s action=%s grader=%.4f env=%.4f combined=%.4f",
-            step_num, difficulty, action, step_score, env_score, combined_score,
-        )
+        log("STEP", {
+            "step":       step_num,
+            "decision":   action_dict["decision"],
+            "reason":     action_dict.get("reason", ""),
+            "reward":     round(float(score), 4),
+            "correct":    info.get("correct_label", "unknown"),
+            "done":       done,
+        })
 
-        # Advance observation
-        if isinstance(result, tuple) and len(result) > 2:
-            obs = info.get("next_obs", obs)
-        elif isinstance(result, dict):
-            obs = result.get("obs", result.get("next_obs", obs))
-        else:
-            obs = getattr(result, "obs", getattr(result, "next_obs", obs))
+        if done:
+            break
 
-    final_score = safe_score(total_reward / max(step_num, 1))
-    logger.info("Episode finished: steps=%d final_score=%.4f", step_num, final_score)
-    return final_score
+    final_score = total_reward / max(step_num, 1)
+
+    log("END", {
+        "task":         task_name,
+        "episode":      episode_num,
+        "total_reward": round(total_reward, 4),
+        "steps":        step_num,
+        "score":        round(final_score, 4),
+    })
+
+    return {
+        "task":         task_name,
+        "score":        final_score,
+        "total_reward": total_reward,
+        "steps_taken":  step_num,
+    }
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-def main():
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    if not API_KEY:
+        print("[ERROR] HF_TOKEN environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
+
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+    # Import environment — try both package and flat layouts
     try:
-        from environment import VIBEEnvironment  # adjust import to your env module
-        env = VIBEEnvironment()
+        from environment.env import AISafetyEnv
     except ImportError:
-        logger.error(
-            "Could not import VIBEEnvironment. "
-            "Make sure 'environment.py' is on PYTHONPATH."
-        )
-        raise
+        try:
+            from env import AISafetyEnv
+        except ImportError:
+            print(
+                "[ERROR] Cannot import AISafetyEnv. "
+                "Make sure environment/env.py exists with class AISafetyEnv.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
-    score = run_episode(env)
-    print(f"Final score: {score:.4f}")
+    all_results = []
+
+    for i, difficulty in enumerate(DIFFICULTIES):
+        env = AISafetyEnv(difficulty=difficulty)
+        result = run_episode(client, env, difficulty, episode_num=i + 1)
+        all_results.append(result)
+
+    # ── Summary ──
+    overall = sum(r["score"] for r in all_results) / len(all_results)
+
+    print("\n" + "=" * 60)
+    print("FINAL RESULTS")
+    print("=" * 60)
+    for r in all_results:
+        print(f"  {r['task']:12s} | score: {r['score']:.3f} | steps: {r['steps_taken']}")
+    print(f"\n  Overall score: {overall:.3f}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
