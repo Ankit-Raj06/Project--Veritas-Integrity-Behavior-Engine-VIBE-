@@ -1,133 +1,224 @@
+#!/usr/bin/env python3
 """
-VIBE – Graders
-Scoring functions for all three difficulty levels.
-REVISED: Uses safe_score to ensure all values are strictly in (0, 1).
+VIBE – Veritas Integrity Behavior Engine
+Inference script for Scaler/Meta PyTorch OpenEnv Hackathon.
+
+Reads from environment variables:
+  API_BASE_URL – LLM router base URL
+  MODEL_NAME   – model identifier
+  HF_TOKEN     – Hugging Face token (used as API key)
 """
-from typing import Optional
 
-# ── Label normalisation ───────────────────────────────────────────────────────
-DECISION_MAP = {
-    "safe":     "safe",
-    "approve":  "safe",
-    "ok":       "safe",
-    "allow":    "safe",
-    "flag":     "flag",
-    "escalate": "flag",
-    "review":   "flag",
-    "remove":   "remove",
-    "delete":   "remove",
-    "reject":   "remove",
-    "toxic":    "remove",
-    "hate":     "remove",
-}
+import os
+import json
+import time
+import logging
+from typing import Any, Dict, Optional, Tuple
 
-LABEL_MAP = {
-    "0":       "safe",
-    "1":       "remove",
-    "safe":    "safe",
-    "flag":    "flag",
-    "remove":  "remove",
-    "toxic":   "remove",
-    "hateful": "remove",
-    "neutral": "safe",
-}
+from openai import OpenAI
+
+from graders import grade_easy, grade_medium, grade_hard
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ── Environment ───────────────────────────────────────────────────────────────
+API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000/v1")
+MODEL_NAME   = os.environ.get("MODEL_NAME", "gpt-4o-mini")
+HF_TOKEN     = os.environ.get("HF_TOKEN", "")
+
+client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "EMPTY")
 
 
-def normalise_decision(raw: str) -> str:
-    return DECISION_MAP.get(str(raw).strip().lower(), "flag")
-
-
-def normalise_label(raw) -> str:
-    return LABEL_MAP.get(str(raw).strip().lower(), "flag")
-
-
-# ── Safety clamp ─────────────────────────────────────────────────────────────
+# ── Safety clamp (mirrors graders.py) ────────────────────────────────────────
 def safe_score(score: float) -> float:
     """Ensure score is strictly within (0, 1) — never exactly 0.0 or 1.0."""
     return max(0.001, min(0.999, float(score)))
 
 
-# ── Core grader ───────────────────────────────────────────────────────────────
-def grade(
-    prediction:  str,
-    ground_truth,
-    threat_type: Optional[str] = "general",
-) -> float:
+# ── LLM call ─────────────────────────────────────────────────────────────────
+def call_llm(
+    system_prompt: str,
+    user_prompt:   str,
+    temperature:   float = 0.0,
+    max_tokens:    int   = 256,
+) -> str:
+    """Call the LLM and return the response text. Returns empty string on error."""
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error("LLM call failed: %s", e)
+        return ""
+
+
+# ── Prompt templates ──────────────────────────────────────────────────────────
+SYSTEM_EASY = """You are a content moderation classifier.
+Classify the following comment as one of: safe, flag, remove.
+Respond with ONLY one word — the label."""
+
+SYSTEM_MEDIUM = """You are a content moderation classifier reviewing a discussion thread.
+Classify the final comment in context as one of: safe, flag, remove.
+Respond with ONLY one word — the label."""
+
+SYSTEM_HARD = """You are a senior content moderation analyst.
+You will be given a post (possibly cross-platform or multi-modal).
+Return a JSON object with exactly two keys:
+  "decision": one of "safe", "flag", or "remove"
+  "justification": a concise explanation (≥10 words) citing specific signals you observed.
+Respond with ONLY valid JSON, no markdown fences."""
+
+
+# ── Task runners ──────────────────────────────────────────────────────────────
+def run_easy(obs: Dict[str, Any]) -> Tuple[str, float]:
+    """Task 1 — single comment, unambiguous label."""
+    comment = obs.get("comment", obs.get("text", ""))
+    prediction = call_llm(SYSTEM_EASY, comment) or "flag"
+    score = grade_easy(prediction, obs.get("label", obs.get("ground_truth", "flag")))
+    return prediction, safe_score(score)
+
+
+def run_medium(obs: Dict[str, Any]) -> Tuple[str, float]:
+    """Task 2 — thread moderation with context."""
+    thread  = obs.get("thread", [])
+    comment = obs.get("comment", obs.get("text", ""))
+
+    context_lines = "\n".join(
+        f"[{i+1}] {c}" for i, c in enumerate(thread)
+    )
+    user_prompt = f"Thread context:\n{context_lines}\n\nComment to classify:\n{comment}"
+
+    prediction    = call_llm(SYSTEM_MEDIUM, user_prompt) or "flag"
+    context_match = obs.get("context_match", True)
+    score = grade_medium(
+        prediction,
+        obs.get("label", obs.get("ground_truth", "flag")),
+        context_match=context_match,
+    )
+    return prediction, safe_score(score)
+
+
+def run_hard(obs: Dict[str, Any]) -> Tuple[str, float]:
+    """Task 3 — cross-platform / multi-modal with justification."""
+    content = obs.get("content", obs.get("text", obs.get("comment", "")))
+    threat_type = obs.get("threat_type", "general")
+
+    raw = call_llm(SYSTEM_HARD, content, max_tokens=512) or "{}"
+
+    # Strip accidental markdown fences
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = "\n".join(raw.split("\n")[1:])
+    if raw.endswith("```"):
+        raw = "\n".join(raw.split("\n")[:-1])
+
+    try:
+        parsed = json.loads(raw)
+        prediction    = parsed.get("decision", "flag")
+        justification = parsed.get("justification", "")
+    except json.JSONDecodeError:
+        logger.warning("Hard task JSON parse failed; raw=%r", raw)
+        prediction    = "flag"
+        justification = ""
+
+    score = grade_hard(
+        prediction,
+        obs.get("label", obs.get("ground_truth", "flag")),
+        justification=justification,
+        threat_type=threat_type,
+    )
+    return prediction, safe_score(score)
+
+
+# ── Episode runner ────────────────────────────────────────────────────────────
+def run_episode(env) -> float:
     """
-    Returns a raw score. Callers are responsible for applying safe_score().
-    Base scores are capped at 0.80 to leave headroom for bonuses.
+    Drive one episode of the VIBE environment.
+    Returns the final score strictly in (0, 1).
     """
-    pred  = normalise_decision(prediction)
-    truth = normalise_label(ground_truth)
+    obs   = env.reset()
+    total_reward = 0.0
+    step_num     = 0
+    done         = False
 
-    score = 0.01  # floor instead of 0.0
+    while not done:
+        step_num += 1
 
-    if pred == truth:
-        score = 0.80  # headroom for medium/hard bonuses
+        # Determine task difficulty
+        difficulty = obs.get("difficulty", "easy") if isinstance(obs, dict) else "easy"
 
-    elif pred == "flag":
-        if truth == "remove":
-            score = 0.50
-        elif truth == "safe":
-            score = 0.40
+        if difficulty == "hard":
+            action, step_score = run_hard(obs)
+        elif difficulty == "medium":
+            action, step_score = run_medium(obs)
+        else:
+            action, step_score = run_easy(obs)
 
-    elif truth == "flag":
-        if pred == "safe":
-            score = 0.30
-        elif pred == "remove":
-            score = 0.60
+        # Submit action to environment
+        result = env.step(action)
 
-    elif pred == "safe" and truth == "remove":
-        score = 0.01  # worst-case floor
+        # Parse env response — handle tuple, dict, or object
+        if isinstance(result, tuple):
+            env_score, done, info = result[0], result[1], result[2] if len(result) > 2 else {}
+            env_score = safe_score(env_score)
+        elif isinstance(result, dict):
+            env_score = safe_score(result.get("score", result.get("reward", 0.1)))
+            done      = result.get("done", True)
+            info      = result.get("info", {})
+        else:
+            env_score = safe_score(getattr(result, "reward", getattr(result, "score", 0.1)))
+            done      = getattr(result, "done", True)
+            info      = getattr(result, "info", {})
 
-    elif pred == "remove" and truth == "safe":
-        score = 0.10
+        # Use our grader score when the env doesn't return a meaningful one
+        combined_score = safe_score((step_score + env_score) / 2.0)
+        total_reward  += combined_score
 
-    return score
+        logger.info(
+            "step=%d difficulty=%s action=%s grader=%.4f env=%.4f combined=%.4f",
+            step_num, difficulty, action, step_score, env_score, combined_score,
+        )
 
+        # Advance observation
+        if isinstance(result, tuple) and len(result) > 2:
+            obs = info.get("next_obs", obs)
+        elif isinstance(result, dict):
+            obs = result.get("obs", result.get("next_obs", obs))
+        else:
+            obs = getattr(result, "obs", getattr(result, "next_obs", obs))
 
-# ── Per-difficulty graders ────────────────────────────────────────────────────
-def grade_easy(prediction: str, ground_truth, **kwargs) -> float:
-    """Task 1 — single comment, unambiguous label.
-    Max possible: 0.80 | Min possible: 0.01
-    """
-    return safe_score(grade(prediction, ground_truth))
-
-
-def grade_medium(
-    prediction:    str,
-    ground_truth,
-    context_match: bool = True,
-    **kwargs
-) -> float:
-    """Task 2 — thread moderation.
-    Bonus 0.10 if prediction is consistent with thread context.
-    Max possible: 0.90 | Min possible: 0.01
-    """
-    base = grade(prediction, ground_truth)
-    if context_match and base > 0.01:
-        base += 0.10
-    return safe_score(base)
+    final_score = safe_score(total_reward / max(step_num, 1))
+    logger.info("Episode finished: steps=%d final_score=%.4f", step_num, final_score)
+    return final_score
 
 
-def grade_hard(
-    prediction:    str,
-    ground_truth,
-    justification: str = "",
-    threat_type:   str = "general",
-    **kwargs,
-) -> float:
-    """Task 3 — cross-platform / multi-modal.
-    Bonus 0.15 if justification references relevant signals.
-    Max possible: 0.95 | Min possible: 0.01
-    """
-    base = grade(prediction, ground_truth, threat_type=threat_type)
+# ── Entry point ───────────────────────────────────────────────────────────────
+def main():
+    try:
+        from environment import VIBEEnvironment  # adjust import to your env module
+        env = VIBEEnvironment()
+    except ImportError:
+        logger.error(
+            "Could not import VIBEEnvironment. "
+            "Make sure 'environment.py' is on PYTHONPATH."
+        )
+        raise
 
-    if justification:
-        words = justification.strip().split()
-        generic_phrases = {"content", "violates", "policy", "guidelines", "inappropriate"}
-        unique_words = {w.lower() for w in words} - generic_phrases
-        if len(words) >= 10 and len(unique_words) >= 5:
-            base += 0.15
+    score = run_episode(env)
+    print(f"Final score: {score:.4f}")
 
-    return safe_score(base)
+
+if __name__ == "__main__":
+    main()
