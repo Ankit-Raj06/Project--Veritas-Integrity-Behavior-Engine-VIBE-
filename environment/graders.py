@@ -1,13 +1,10 @@
 """
 VIBE – Graders
 Scoring functions for all three difficulty levels.
-
-Score ranges: (0,1) — strictly bounded
-Partial credit is given for "flag" when truth is ambiguous.
+REVISED: Removed clamp_score; logic now uses safe boundaries.
 """
 
 from typing import Optional
-
 
 # ── Label normalisation ───────────────────────────────────────────────────────
 
@@ -37,26 +34,11 @@ LABEL_MAP = {
     "neutral":  "safe",
 }
 
-
 def normalise_decision(raw: str) -> str:
     return DECISION_MAP.get(str(raw).strip().lower(), "flag")
 
-
 def normalise_label(raw) -> str:
     return LABEL_MAP.get(str(raw).strip().lower(), "flag")
-
-
-# ── Clamp helper ─────────────────────────────────────────────────────────────
-
-def clamp_score(score: float) -> float:
-    """
-    Ensures score is strictly between (0, 1)
-    """
-    if score <= 0.0:
-        return 0.01
-    if score >= 1.0:
-        return 0.99
-    return score
 
 
 # ── Core grader ───────────────────────────────────────────────────────────────
@@ -68,48 +50,45 @@ def grade(
 ) -> float:
     """
     Returns a score strictly in (0,1).
-
-    Scoring logic:
-      - Exact match                        → ~1.0
-      - Predicted "flag", truth is toxic   → 0.5
-      - Predicted "flag", truth is safe    → 0.4
-      - Wrong direction (remove↔safe)      → ~0.0
+    Base scores are capped at 0.8 to allow headroom for bonuses.
     """
-
     pred  = normalise_decision(prediction)
     truth = normalise_label(ground_truth)
 
-    # Default score
-    score = 0.0
+    # Instead of 0.0, we start at a tiny floor
+    score = 0.01
 
     if pred == truth:
-        score = 1.0
+        # Instead of 1.0, we return 0.80. 
+        # This leaves 0.20 of 'room' for medium/hard bonuses.
+        score = 0.80
 
     elif pred == "flag":
         if truth == "remove":
-            score = 0.5
+            score = 0.50
         elif truth == "safe":
-            score = 0.4
+            score = 0.40
 
     elif truth == "flag":
         if pred == "safe":
-            score = 0.3
+            score = 0.30
         elif pred == "remove":
-            score = 0.6
+            score = 0.60
 
     elif pred == "safe" and truth == "remove":
-        score = 0.0
+        score = 0.01 # Floor instead of 0.0
 
     elif pred == "remove" and truth == "safe":
-        score = 0.1
+        score = 0.10
 
-    return clamp_score(score)
+    return score
 
 
 # ── Per-difficulty graders ────────────────────────────────────────────────────
 
 def grade_easy(prediction: str, ground_truth, **kwargs) -> float:
     """Task 1 — single comment, unambiguous label."""
+    # Max possible: 0.80 | Min possible: 0.01
     return grade(prediction, ground_truth)
 
 
@@ -125,10 +104,11 @@ def grade_medium(
     """
     base = grade(prediction, ground_truth)
 
-    if context_match and base > 0:
-        base += 0.1
+    if context_match and base > 0.01:
+        base += 0.10
 
-    return clamp_score(base)
+    # Max possible: 0.90 | Min possible: 0.01
+    return base
 
 
 def grade_hard(
@@ -142,7 +122,6 @@ def grade_hard(
     Task 3 — cross-platform / multi-modal.
     Bonus 0.15 if justification references relevant signals.
     """
-
     base = grade(prediction, ground_truth, threat_type=threat_type)
 
     # Bonus for quality justification
@@ -154,4 +133,5 @@ def grade_hard(
         if len(words) >= 10 and len(unique_words) >= 5:
             base += 0.15
 
-    return clamp_score(base)
+    # Max possible: 0.95 | Min possible: 0.01
+    return base
