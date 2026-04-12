@@ -115,7 +115,7 @@ def run_episode(client: OpenAI, env, difficulty: str, episode_num: int) -> dict:
     else:
         obs = dict(obs_obj) if obs_obj else {}
 
-    total_reward = 0.0
+    total_reward = 0.01
     step_num     = 0
 
     for step_num in range(1, MAX_STEPS + 1):
@@ -136,12 +136,12 @@ def run_episode(client: OpenAI, env, difficulty: str, episode_num: int) -> dict:
         if isinstance(result, tuple):
             score, done, info = result
         elif isinstance(result, dict):
-            score = result.get("score", result.get("reward", 0.0))
+            score = result.get("score", result.get("reward", 0.01))
             done  = result.get("done", True)
             info  = result.get("info", {})
         else:
             # Pydantic StepResult or similar
-            score = getattr(result, "reward", getattr(result, "score", 0.0))
+            score = getattr(result, "reward", getattr(result, "score", 0.01))
             done  = getattr(result, "done", True)
             info  = getattr(result, "info", {})
 
