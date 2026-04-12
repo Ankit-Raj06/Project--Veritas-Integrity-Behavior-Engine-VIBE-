@@ -1,13 +1,10 @@
-#!/usr/bin/env python3
 """
 VIBE – Veritas Integrity Behavior Engine
 Inference script for Scaler/Meta PyTorch OpenEnv Hackathon.
-
 Reads from environment variables:
     API_BASE_URL  – LLM router base URL
     MODEL_NAME    – model identifier
     HF_TOKEN      – Hugging Face token (used as API key)
-
 Log format:
     [START] {...}
     [STEP]  {...}
@@ -31,26 +28,21 @@ MAX_STEPS    = 10
 
 # ── System prompt ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are VIBE — a context-aware AI content moderation agent.
-
 Your job: analyse a YouTube comment alongside its video context and decide how to moderate it.
-
 You will receive:
 - video_context: a description of the video the comment was posted on
 - chat_history: previous comments in the same thread
 - comment: the comment you must moderate
 - difficulty: easy / medium / hard
-
 DECISION OPTIONS:
 - "safe"    → Comment is acceptable; no action needed
 - "flag"    → Comment is borderline or context-dependent; escalate for human review
 - "remove"  → Comment is clearly harmful, hateful, or violates policy
-
 IMPORTANT RULES:
 1. Context is everything. "bhai tu toh gaya 💀" on a gaming video = safe banter. Same phrase on a communal news video = flag/remove.
 2. Hinglish and code-switching (Hindi+English mixed) is normal — do not flag purely based on non-English words.
 3. Sarcasm, dark humour, and cultural idioms require context to judge correctly.
 4. Consider the chat_history — a single comment may only be harmful in sequence.
-
 Respond ONLY with a JSON object in this exact format (no extra text, no markdown):
 {"decision": "<safe|flag|remove>", "reason": "<one sentence explanation>"}"""
 
